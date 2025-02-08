@@ -2,4 +2,4 @@
 
 This is my first Git Repository
 <br>
-Developers-Shikhar & Binit
+Developers - Shikhar and Binit
