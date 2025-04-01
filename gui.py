@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, PhotoImage
 from tkinter import filedialog as fd
 from PIL import Image, ImageTk, ImageOps, ImageFilter, ImageEnhance
 
@@ -16,10 +16,16 @@ img_width = 0
 img_height = 0
 perc_zoom = ''
 filter = 0
-top_scale_value = tk.DoubleVar()
-bottom_scale_value = tk.DoubleVar()
-left_scale_value = tk.DoubleVar()
-right_scale_value = tk.DoubleVar()
+crop_active = False
+crop_rect = None
+rect_coords = None
+dragging = None
+offset_x = 0
+offset_y = 0
+a = b = c = d = 0
+
+undo_stack = []
+redo_stack = []
 
 def select_file() -> None:
     global edited_img, image_path, img_width, img_height, perc_zoom
@@ -33,7 +39,8 @@ def select_file() -> None:
         perc_zoom = str(int(img_height / original_img.height * 100)) + '%'
         lb.configure(text = perc_zoom)
         edited_img = original_img.resize((img_width, img_height))
-        display_image(edited_img)
+        undo_stack.append(edited_img)
+        display_image()
 
 def save_file() -> None:
     global output_path, edited_img
@@ -48,128 +55,198 @@ def save_file() -> None:
             if output_path:
                 edited_img.save(output_path)
 
-def display_image(img : Image) -> None:
+def display_image() -> None:
     global opened_img, image_id
-    opened_img = ImageTk.PhotoImage(img)
-    w = min(disp_img_frame.winfo_width(), img.width)
-    h = min(disp_img_frame.winfo_height(), img.height)
+    opened_img = ImageTk.PhotoImage(edited_img)
+    canvas.delete('all')
+    w = min(disp_img_frame.winfo_width(), edited_img.width)
+    h = min(disp_img_frame.winfo_height(), edited_img.height)
     canvas.config(width = w, height = h)
-    image_id = canvas.create_image(0, 0, image = opened_img, anchor = 'nw')
+    image_id = canvas.create_image(w / 2, h / 2, image = opened_img, anchor = 'center')
 
-def crop_image(left, top, right, bottom):
-    global edited_img
-    cropped_img = Image.open(image_path).resize((img_width, img_height))
-    edited_img = cropped_img.crop((left, top, img_width - right, img_height - bottom))
-    if filter != 0:
-        apply_filter()
+def enable_crop_mode():
+    global crop_active, rect_coords
+    if edited_img:
+        crop_active = True
+        rect_coords = (3, 3, canvas.winfo_width() - 4, canvas.winfo_height() - 4)
+        draw_crop_rectangle()
+        crop_btn.place(relx=0.5, rely=0.95, anchor='center')
+
+def draw_crop_rectangle():
+    global crop_rect
+    if crop_active and edited_img:
+        x1, y1, x2, y2 = rect_coords
+        canvas.delete("crop_rect")  # Remove old rectangle
+        crop_rect = canvas.create_rectangle(x1, y1, x2, y2, outline="red", width=2, tags="crop_rect")
+
+def on_press(event):
+    global dragging, offset_x, offset_y
+    if not crop_active:
+        return
+
+    x, y = canvas.canvasx(event.x), canvas.canvasy(event.y)
+    x1, y1, x2, y2 = rect_coords
+    margin = 10
+
+    if x1 - margin < x < x1 + margin and y1 - margin < y < y1 + margin:
+        dragging = "topleft"
+    elif x2 - margin < x < x2 + margin and y1 - margin < y < y1 + margin:
+        dragging = "topright"
+    elif x1 - margin < x < x1 + margin and y2 - margin < y < y2 + margin:
+        dragging = "bottomleft"
+    elif x2 - margin < x < x2 + margin and y2 - margin < y < y2 + margin:
+        dragging = "bottomright"
+    elif x1 < x < x2 and y1 < y < y2:
+        dragging = "move"
+        offset_x = x - x1
+        offset_y = y - y1
     else:
-        display_image(edited_img)
+        dragging = None
 
-def edit_controls(w, h):
-    if opened_img:
-        controls = tk.Toplevel()
-        controls.geometry('400x300')
-        controls.attributes('-topmost', 1)
+def on_drag(event):
+    global rect_coords
+    if not crop_active or not dragging:
+        return
 
-        top_lb = ttk.Label(controls, text = 'Top')
-        top_lb.pack(anchor = 'w')
-        top_scale = ttk.Scale(controls, from_ = 0, to=h, orient = 'horizontal', variable = top_scale_value,
-                              command = lambda x: crop_image(left_scale.get(),
-                                                             top_scale.get(),
-                                                             right_scale.get(),
-                                                             bottom_scale.get()))
-        top_scale.pack(anchor = 'w', fill = 'x')
+    x, y = canvas.canvasx(event.x), canvas.canvasy(event.y)
+    x1, y1, x2, y2 = rect_coords
 
-        bottom_lb = ttk.Label(controls, text = 'Bottom')
-        bottom_lb.pack(anchor = 'w')
-        bottom_scale = ttk.Scale(controls, from_=0, to=h, orient='horizontal', variable = bottom_scale_value,
-                                 command=lambda x: crop_image(left_scale.get(),
-                                                              top_scale.get(),
-                                                              right_scale.get(),
-                                                              bottom_scale.get()))
-        bottom_scale.pack(anchor='w', fill='x')
+    if dragging == "topleft":
+        rect_coords = (min(max(x,3), x2-50), min(max(y,3), y2-50), x2, y2)
+    elif dragging == "topright":
+        rect_coords = (x1, min(max(y,3), y2-50), max(min(x, canvas.winfo_width()-4), x1+50), y2)
+    elif dragging == "bottomleft":
+        rect_coords = (min(max(x,3), x2-50), y1, x2, max(min(y, canvas.winfo_height()-4), y1+50))
+    elif dragging == "bottomright":
+        rect_coords = (x1, y1, max(min(x, canvas.winfo_width()-4), x1+50), max(min(y, canvas.winfo_height()-4), y1+50))
+    elif dragging == "move":
+        dx, dy = x - offset_x, y - offset_y
+        width, height = x2 - x1, y2 - y1
+        rect_coords = (min(max(3, dx), canvas.winfo_width() - width - 4),
+                       min(max(3, dy), canvas.winfo_height() - height - 4),
+                       min(max(3 + width, dx + width), canvas.winfo_width() - 4),
+                       min(max(3 + height, dy + height), canvas.winfo_height() - 4))
 
-        left_lb = ttk.Label(controls, text = 'Left')
-        left_lb.pack(anchor = 'w')
-        left_scale = ttk.Scale(controls, from_=0, to=w, orient='horizontal', variable = left_scale_value,
-                               command=lambda x: crop_image(left_scale.get(),
-                                                            top_scale.get(),
-                                                            right_scale.get(),
-                                                            bottom_scale.get()))
-        left_scale.pack(anchor='w', fill='x')
+    draw_crop_rectangle()
 
-        right_lb = ttk.Label(controls, text = 'Right')
-        right_lb.pack(anchor = 'w')
-        right_scale = ttk.Scale(controls, from_=0, to=w, orient='horizontal', variable = right_scale_value,
-                                command=lambda x: crop_image(left_scale.get(),
-                                                             top_scale.get(),
-                                                             right_scale.get(),
-                                                             bottom_scale.get()))
-        right_scale.pack(anchor='w', fill='x')
+def on_release(event):
+    global dragging
+    dragging = None
+
+def crop_image():
+    global edited_img, crop_active, a, b, c, d
+    if edited_img:
+        x1, y1, x2, y2 = map(int, rect_coords)
+        a += (x1 - 3)
+        b += (y1 - 3)
+        c = a + x2 - x1 + 3
+        d = b + y2 - y1 + 3
+        edited_img = edited_img.crop((x1-3, y1-3, x2, y2))
+        crop_active = False
+        undo_stack.append(edited_img)
+        if len(redo_stack):
+            redo_stack.clear()
+        display_image()
+        crop_btn.place_forget()
 
 def convert_to_original():
     global filter, edited_img
     if opened_img:
         filter = 0
-        crop_image(int(left_scale_value.get()), int(top_scale_value.get()), int(right_scale_value.get()), int(bottom_scale_value.get()))
-        display_image(edited_img)
+        edited_img = Image.open(image_path).resize((img_width, img_height))
+        if rect_coords:
+            edited_img = edited_img.crop((a, b, c, d))
+        undo_stack.append(edited_img)
+        if len(redo_stack):
+            redo_stack.clear()
+        display_image()
 
 def convert_to_warm():
     global edited_img, filter
     if opened_img:
-        convert_to_original()
+        edited_img = Image.open(image_path).resize((img_width, img_height))
+        if rect_coords:
+            edited_img = edited_img.crop((a, b, c, d))
         filter = 1
         img = edited_img.convert('RGB')
-        r, g, b = img.split()
+        r, g, bl = img.split()
         r = r.point(lambda p: min(255, p * 1.2))
         g = g.point(lambda p: min(255, p * 1.1))
-        b = b.point(lambda p: max(0, p * 0.9))
-        edited_img = Image.merge('RGB', (r, g, b))
+        bl = bl.point(lambda p: max(0, p * 0.9))
+        edited_img = Image.merge('RGB', (r, g, bl))
         edited_img = ImageEnhance.Brightness(edited_img).enhance(1.1)
         edited_img = ImageEnhance.Contrast(edited_img).enhance(1.2)
-        display_image(edited_img)
+        undo_stack.append(edited_img)
+        if len(redo_stack):
+            redo_stack.clear()
+        display_image()
 
 def convert_to_greyscale():
     global edited_img, filter
     if opened_img:
-        convert_to_original()
+        edited_img = Image.open(image_path).resize((img_width, img_height))
+        if rect_coords:
+            edited_img = edited_img.crop((a, b, c, d))
         filter = 2
         edited_img = edited_img.convert("L")
-        display_image(edited_img)
+        undo_stack.append(edited_img)
+        if len(redo_stack):
+            redo_stack.clear()
+        display_image()
 
 def convert_to_nv():
     global edited_img, filter
     if opened_img:
-        convert_to_original()
+        edited_img = Image.open(image_path).resize((img_width, img_height))
+        if rect_coords:
+            edited_img = edited_img.crop((a, b, c, d))
         filter = 3
         img = edited_img.convert('RGB')
-        r, g, b = img.split()
+        r, g, bl = img.split()
         edited_img = Image.merge('RGB', (g, g.point(lambda x: min(255, x * 1.5)), g))
-        display_image(edited_img)
+        undo_stack.append(edited_img)
+        if len(redo_stack):
+            redo_stack.clear()
+        display_image()
 
 def convert_to_bw():
     global edited_img, filter
     if opened_img:
-        convert_to_original()
+        edited_img = Image.open(image_path).resize((img_width, img_height))
+        if rect_coords:
+            edited_img = edited_img.crop((a, b, c, d))
         filter = 4
         edited_img = edited_img.convert("L").point(lambda x: 255 if x > 128 else 0, mode = '1')
-        display_image(edited_img)
+        undo_stack.append(edited_img)
+        if len(redo_stack):
+            redo_stack.clear()
+        display_image()
 
 def convert_to_invert():
     global edited_img, filter
     if opened_img:
-        convert_to_original()
+        edited_img = Image.open(image_path).resize((img_width, img_height))
+        if rect_coords:
+            edited_img = edited_img.crop((a, b, c, d))
         filter = 5
         edited_img = ImageOps.invert(edited_img)
-        display_image(edited_img)
+        undo_stack.append(edited_img)
+        if len(redo_stack):
+            redo_stack.clear()
+        display_image()
 
 def convert_to_blur():
     global edited_img, filter
     if opened_img:
-        convert_to_original()
+        edited_img = Image.open(image_path).resize((img_width, img_height))
+        if rect_coords:
+            edited_img = edited_img.crop((a, b, c, d))
         filter = 6
         edited_img = edited_img.filter(ImageFilter.GaussianBlur(5))
-        display_image(edited_img)
+        undo_stack.append(edited_img)
+        if len(redo_stack):
+            redo_stack.clear()
+        display_image()
 
 def apply_filter():
     if filter == 1:
@@ -196,7 +273,10 @@ def zoom_in() -> None:
         perc_zoom = str(int(img_height / img.height * 100)) + '%'
         lb.configure(text = perc_zoom)
         edited_img = img.resize((img_width, img_height))
-        display_image(edited_img)
+        if filter != 0:
+            apply_filter()
+        else:
+            display_image()
 
 def zoom_out() -> None:
     global edited_img, img_width, img_height, perc_zoom
@@ -207,7 +287,24 @@ def zoom_out() -> None:
         perc_zoom = str(int(img_height / img.height * 100)) + '%'
         lb.configure(text = perc_zoom)
         edited_img = img.resize((img_width, img_height))
-        display_image(edited_img)
+        if filter != 0:
+            apply_filter()
+        else:
+            display_image()
+
+def undo() -> None:
+    global edited_img
+    if len(undo_stack) > 1:
+        redo_stack.append(undo_stack.pop())
+        edited_img = undo_stack[-1]
+        display_image()
+
+def redo() -> None:
+    global edited_img
+    if len(redo_stack):
+        undo_stack.append(redo_stack.pop())
+        edited_img = undo_stack[-1]
+        display_image()
 
 def move_image(event) -> None:
     global opened_img
@@ -233,7 +330,7 @@ file_menu.add_command(label='Save as copy', command = save_file)
 file_menu.add_separator()
 file_menu.add_command(label='Exit', command=window.quit)
 edit_menu = tk.Menu(menu, tearoff=0)
-edit_menu.add_command(label='Crop', command = lambda : edit_controls(w=img_width, h=img_height))
+edit_menu.add_command(label='Crop', command = enable_crop_mode)
 edit_menu.add_command(label='Adjustment')
 filter_menu = tk.Menu(edit_menu, tearoff = 0)
 filter_menu.add_command(label = 'Warm', command = convert_to_warm)
@@ -247,8 +344,8 @@ edit_menu.add_cascade(label = 'Filters', menu = filter_menu)
 edit_menu.add_command(label='Mark-up')
 menu.add_cascade(label='File', menu=file_menu)
 menu.add_cascade(label='Edit', menu=edit_menu)
-menu.add_command(label = 'Undo')
-menu.add_command(label = 'Redo')
+menu.add_command(label = 'Undo', command = undo)
+menu.add_command(label = 'Redo', command = redo)
 menu.add_command(label = 'Clear', command = clear)
 window.configure(menu = menu)
 
@@ -265,6 +362,12 @@ b1.pack(side = 'right', anchor = 'se')
 lb = ttk.Label(window, text = perc_zoom)
 lb.pack(side = 'right', anchor = 'se', padx = 3, pady = 3)
 
-canvas.bind('<B1-Motion>', move_image)
+crop_btn = tk.Button(window, text="Crop", command=crop_image)
+crop_btn.place(relx=0.5, rely=0.95, anchor='center')
+crop_btn.place_forget()
+
+canvas.bind('<ButtonPress-1>', on_press)
+canvas.bind('<B1-Motion>', on_drag)
+canvas.bind('<ButtonRelease-1>', on_release)
 
 window.mainloop()
